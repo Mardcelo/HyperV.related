@@ -9,7 +9,7 @@ it also has a siple gui that enables you to search in founded values by Adddress
 In addition to searching and decoding, you can set proper comments or symbolic constant on these values
 automatically
 
-IA32-MSR decoder
+IA32-VMX decoder
 """
 
 
