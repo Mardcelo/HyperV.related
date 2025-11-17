@@ -1,13 +1,14 @@
 #
-# Coded by @BehroozAbbassi 2019
+# Coded by @0xMard 2025, original code by @BehroozAbbassi 2019
+# 
 #
 
-import collections
-import logging
-import os
+from __future__ import print_function
+
 import idaapi
 import idautils
 import idc
+import ida_ua
 
 msr_list = {
 
@@ -712,91 +713,114 @@ msr_list = {
 #######################################################
 }
 
-
-
 class IdaPlugin(object):
-    def GetMsrCodeFromOperand(self,ea):
-        while True:
-            ea = idc.PrevAddr(ea)
-            mnemonic = idc.GetMnem(ea)
-            operand = idc.GetOpnd(ea, 0)
+    def GetMsrCodeFromOperand(self, inst_ea, func_start):
+        """
+        Walk backwards in the current function looking for
+        'mov ecx, imm' / 'mov rcx, imm' that sets the MSR index.
+        Stops at function start or BADADDR.
+        """
+        ea = inst_ea
 
-            # Not imm value :-(
-            if mnemonic == "lea" and ("ecx" in operand or "rcx" in operand):
+        while True:
+            ea = idc.prev_head(ea)
+            if ea == idc.BADADDR or ea < func_start:
                 return None
 
-            if mnemonic == "mov" and ("ecx" in operand or "rcx" in operand):
-                if idc.GetOpType(ea,1) == idaapi.idaapi.o_imm:
-                    return idc.GetOperandValue(ea, 1)
-                else:
-                    return None
-                #     return 'Not imm' + idc.GetDisasm(ea)
+            mnem = idc.print_insn_mnem(ea)
+            if mnem not in ("mov", "lea"):
+                continue
 
-    def GetJumpAddr(self,call_addr, func_ea):
-        func_addr = idc.LocByName(idc.GetFunctionName(func_ea))
-        ret = int(call_addr - func_addr)
-        return hex(ret).replace("0x", "")
+            dst = idc.print_operand(ea, 0)
+            if dst not in ("ecx", "rcx"):
+                continue
 
-    def NormalizeHexValue(self,msr_code):
-        msr_code_hex = hex(msr_code)
-        if(len(msr_code_hex)>10):
-            # msr_code_hex = '0x{}'.format(msr_code_hex[-8:].upper())
-            msr_code_hex = msr_code_hex.upper().replace('0xffffffff'.upper(),'0x')
-        elif(len(msr_code_hex)<10):
-            msr_code_hex = '0x{0:08X}'.format(msr_code)
+            # LEA into ECX/RCX 
+            if mnem == "lea":
+                return None
 
-        msr_code_hex = msr_code_hex.upper().replace('0X','0x').replace('L','')
+            # MOV ECX, imm32/imm64
+            optype = idc.get_operand_type(ea, 1)
+            if optype == ida_ua.o_imm:
+                return idc.get_operand_value(ea, 1)
+            else:
+                # there is an earlier mov ecx, imm
+                continue
 
-        return msr_code_hex
+    def GetOffsetInFunction(self, inst_ea, func_ea):
+        """
+        Return function offset as a hex string without '0x' prefix
+        """
+        func_name = idc.get_func_name(func_ea)
+        func_start = idc.get_name_ea_simple(func_name)
+        if func_start == idc.BADADDR:
+            return "0"
+        off = inst_ea - func_start
+        return "{:X}".format(off)
 
-    def PrintMsrTable(self,msr_code ,function_ea,inst_ea ):
-        mnemonic = idc.GetMnem(inst_ea)
-        call_addr = self.GetJumpAddr(inst_ea, function_ea)
-        function_name = idc.GetFunctionName(function_ea)+ '+' + call_addr
-        dwSize = 30 - len(function_name)
-        delimeter = " " * dwSize
+    def NormalizeHexValue(self, msr_code):
+        """
+        Normalize to a 32-bit MSR hex strings
+        """
+        msr_code &= 0xFFFFFFFF
+        return "0x{0:08X}".format(msr_code)
 
-        if(msr_code == None):
-            msr_code_hex = 'Not imm value'
-        else:
-            msr_code_hex = self.NormalizeHexValue(msr_code)
+    def PrintMsrTable(self, msr_code, function_ea, inst_ea):
+        mnem = idc.print_insn_mnem(inst_ea)
+        func_name = idc.get_func_name(function_ea)
+        offset_str = self.GetOffsetInFunction(inst_ea, function_ea)
 
-        
+        full_func_name = "{}+{}".format(func_name, offset_str)
+        delimeter = " " * max(0, 30 - len(full_func_name))
 
-        if(msr_code == None):
+        if msr_code is None:
+            msr_code_hex = "Not imm value"
             msr_name = msr_code_hex
         else:
+            msr_code_hex = self.NormalizeHexValue(msr_code)
             msr_name = msr_list.get(int(msr_code_hex, 16))
+            if msr_name is None:
+                msr_name = "UNKNOWN_MSR"
 
-        idc.MakeComm(inst_ea, '{}({})'.format(mnemonic,msr_name))
-        idc.SetColor(inst_ea,idc.CIC_ITEM,0xf8abef)
+        cmt = "{}({})".format(mnem, msr_name)
+        # 0 is non-repeatable comment
+        idc.set_cmt(inst_ea, cmt, 0)
+        idc.set_color(inst_ea, idc.CIC_ITEM, 0x00F8ABEF)
 
-        msr_name_delimeter = (" " * (15 - len(msr_code_hex)))
+        msr_name_delim = " " * max(0, 15 - len(msr_code_hex))
 
-        print '{}{}| {} | {} {} | {}'.format(function_name,
-                                             delimeter,
-                                             mnemonic,
-                                             msr_code_hex,
-                                             msr_name_delimeter,
-                                             msr_name)
+        print("{:<30} | {:4} | {:>12}{} | {}".format(
+            full_func_name,
+            mnem,
+            msr_code_hex,
+            msr_name_delim,
+            msr_name
+        ))
 
     def Run(self):
-        for function_ea in idautils.Functions():
-            for inst_ea in idautils.FuncItems(function_ea):
-                if idaapi.isCode(idaapi.getFlags(inst_ea)):
-                    mnemonic = idc.GetMnem(inst_ea)
-                    if(mnemonic =='rdmsr' or mnemonic=='wrmsr'):
-                        msr_code = self.GetMsrCodeFromOperand(inst_ea)
-                        self.PrintMsrTable(msr_code,function_ea,inst_ea)
+        for func_ea in idautils.Functions():
+            func = idaapi.get_func(func_ea)
+            if not func:
+                continue
+
+            for inst_ea in idautils.FuncItems(func_ea):
+                if not idaapi.is_code(idaapi.get_full_flags(inst_ea)):
+                    continue
+
+                mnem = idc.print_insn_mnem(inst_ea)
+                if mnem not in ("rdmsr", "wrmsr"):
+                    continue
+
+                msr_code = self.GetMsrCodeFromOperand(inst_ea, func.start_ea)
+                self.PrintMsrTable(msr_code, func_ea, inst_ea)
 
 
 def main():
-    print '-'*100
-    print '[!] Extracted MSRs from [{}]'.format(idaapi.get_input_file_path() )
-    print '-'*100
-
+    print("-" * 100)
+    print("[!] Extracted MSRs from [{}]".format(idaapi.get_input_file_path()))
+    print("-" * 100)
     IdaPlugin().Run()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
